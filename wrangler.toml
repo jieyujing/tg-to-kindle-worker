@@ -1,0 +1,7 @@
+name = "tg-to-kindle-worker"
+main = "src/index.ts"
+compatibility_date = "2024-05-02"
+
+[[kv_namespaces]]
+binding = "KINDLE_BOT_KV"
+id = "e921705778e747baa05c822c9dd1a6f6"
