@@ -58,7 +58,6 @@ export default {
       const fileSize = document.file_size || 0;
 
       // 4. 格式白名单校验 (Allowed Extensions Whitelist)
-      // 仅允许亚马逊 Kindle 官方认可的书籍、文档和图片格式
       const ALLOWED_EXTENSIONS = ["epub", "pdf", "txt", "doc", "docx", "html", "htm", "rtf", "jpg", "jpeg", "png", "gif", "bmp", "prc"];
       const fileExtension = fileName.split('.').pop()?.toLowerCase();
 
@@ -95,78 +94,97 @@ export default {
         }
       }
 
-      // 7. 状态反馈：通知用户正在处理中
+      // 7. 瞬间响应前哨反馈：通知用户正在处理中
       await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `⏳ 正在从 Telegram 接收书籍《${fileName}》并准备推送到 Kindle，请稍候...`);
 
-      // 8. 下载图书文件
-      // 8.1 获取文件下载路径
-      const fileInfoResponse = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`);
-      if (!fileInfoResponse.ok) {
-        throw new Error(`获取 TG 文件路径失败: ${fileInfoResponse.statusText}`);
-      }
-      const fileInfoData: any = await fileInfoResponse.json();
-      if (!fileInfoData.ok) {
-        throw new Error(`TG getFile 接口返回异常: ${fileInfoData.description}`);
-      }
-      const filePath = fileInfoData.result.file_path;
+      // ==========================================
+      // 🚀 【神级重构】：将所有慢速 I/O 任务全部移入后台异步队列！
+      // ==========================================
+      ctx.waitUntil((async () => {
+        try {
+          // 8. 真实拉取图书文件 (异步后台)
+          // 8.1 获取文件下载路径
+          const fileInfoResponse = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`);
+          if (!fileInfoResponse.ok) {
+            throw new Error(`获取 TG 文件路径失败: ${fileInfoResponse.statusText}`);
+          }
+          const fileInfoData: any = await fileInfoResponse.json();
+          if (!fileInfoData.ok) {
+            throw new Error(`TG getFile 接口返回异常: ${fileInfoData.description}`);
+          }
+          const filePath = fileInfoData.result.file_path;
 
-      // 8.2 真实下载二进制文件数据
-      const fileDownloadUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`;
-      const fileResponse = await fetch(fileDownloadUrl);
-      if (!fileResponse.ok) {
-        throw new Error(`从 TG 下载文件二进制流失败: ${fileResponse.statusText}`);
-      }
+          // 8.2 真实下载二进制数据
+          const fileDownloadUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`;
+          const fileResponse = await fetch(fileDownloadUrl);
+          if (!fileResponse.ok) {
+            throw new Error(`从 TG 下载文件二进制流失败: ${fileResponse.statusText}`);
+          }
 
-      const fileArrayBuffer = await fileResponse.arrayBuffer();
+          const fileArrayBuffer = await fileResponse.arrayBuffer();
 
-      // 9. 二进制流转为 Base64 编码 (Resend API 要求格式)
-      const base64Content = arrayBufferToBase64(fileArrayBuffer);
+          // 9. 二进制流转为 Base64 编码
+          const base64Content = arrayBufferToBase64(fileArrayBuffer);
 
-      // 10. 构造并发送邮件 (调用 Resend API)
-      const emailResponse = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${env.RESEND_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          from: env.FROM_EMAIL,
-          to: [env.KINDLE_EMAIL],
-          subject: `Deliver Book: ${fileName}`,
-          text: `Here is your book: ${fileName}. Powered by localVPS Serverless Bot.`,
-          attachments: [
-            {
-              filename: fileName,
-              content: base64Content
-            }
-          ]
-        })
-      });
+          // 10. 构造并发送邮件 (调用 Resend API)
+          const emailResponse = await fetch("https://api.resend.com/emails", {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${env.RESEND_API_KEY}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              from: env.FROM_EMAIL,
+              to: [env.KINDLE_EMAIL],
+              subject: `Deliver Book: ${fileName}`,
+              text: `Here is your book: ${fileName}. Powered by localVPS Serverless Bot.`,
+              attachments: [
+                {
+                  filename: fileName,
+                  content: base64Content
+                }
+              ]
+            })
+          });
 
-      if (!emailResponse.ok) {
-        const errText = await emailResponse.text();
-        throw new Error(`Resend 邮件投递失败: ${errText}`);
-      }
+          if (!emailResponse.ok) {
+            const errText = await emailResponse.text();
+            throw new Error(`Resend 邮件投递失败: ${errText}`);
+          }
 
-      const emailResult: any = await emailResponse.json();
-      console.log(`Email sent successfully, ID: ${emailResult.id}`);
+          const emailResult: any = await emailResponse.json();
+          console.log(`Email sent successfully, ID: ${emailResult.id}`);
 
-      // 11. 去重归档：将发送成功的文件指纹写入 KV 数据库（记录发送时间）
-      if (fileUniqueId) {
-        await env.KINDLE_BOT_KV.put(fileUniqueId, new Date().toISOString());
-      }
+          // 11. 去重归档：将发送成功的文件指纹写入 KV 数据库（记录发送时间）
+          if (fileUniqueId) {
+            await env.KINDLE_BOT_KV.put(fileUniqueId, new Date().toISOString());
+          }
 
-      // 12. 推送成功反馈
-      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `✅ 《${fileName}》发送成功！正在通过亚马逊云端同步到您的 Kindle，请在数分钟内注意设备更新。`);
+          // 12. 推送成功反馈 (异步发送)
+          await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `✅ 《${fileName}》发送成功！正在通过亚马逊云端同步到您的 Kindle，请在数分钟内注意设备更新。`);
 
+        } catch (error: any) {
+          console.error(`Error processing background task:`, error);
+          // 物理异常弹回给用户，提供极佳的交互回执
+          await sendTelegramMessage(
+            env.TELEGRAM_BOT_TOKEN,
+            chatId,
+            `❌ 图书推送失败。\n\n原因：${error.message || error || "未知接口异常"}\n请核对您的 Resend 配置或稍后重试。`
+          );
+        }
+      })());
+
+      // ==========================================
+      // 🏆 【1毫秒内快速回执】：告诉 Telegram 我们已收到消息，彻底终止重试死循环！
+      // ==========================================
       return new Response("OK", { status: 200 });
+
     } catch (error: any) {
       console.error(`Error processing Webhook:`, error);
-      // 物理异常弹回给用户，提供极佳的交互回执
       await sendTelegramMessage(
         env.TELEGRAM_BOT_TOKEN,
         chatId,
-        `❌ 图书推送失败。\n\n原因：${error.message || error || "未知接口异常"}\n请核对您的 Resend 配置或稍后重试。`
+        `❌ 接口初始化异常，原因：${error.message || error}`
       );
       return new Response("Error processed internally", { status: 200 });
     }
