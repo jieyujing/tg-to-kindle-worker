@@ -47,17 +47,31 @@ export default {
             "📚 欢迎使用 Kindle 自动推送 Bot！\n\n请直接将您的电子书（支持 .epub, .pdf 等格式）作为“文件/文档”发送给我，我将自动帮您推送到您的 Kindle 设备。"
           );
         } else {
-          await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, "ℹ️ 请发送电子书文件（如 .epub 格式 of 电子书文档），而不是普通文字消息。");
+          await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, "ℹ️ 请发送电子书文件（如 .epub 格式的文档），而不是普通文字消息。");
         }
         return new Response("OK", { status: 200 });
       }
 
       const fileId = document.file_id;
-      const fileUniqueId = document.file_unique_id; // Telegram 提供的文件全局唯一指纹 (内容相同则指纹相同)
+      const fileUniqueId = document.file_unique_id; // Telegram 提供的文件全局唯一指纹
       const fileName = document.file_name || "book.epub";
       const fileSize = document.file_size || 0;
 
-      // 4. 大文件检测限制
+      // 4. 格式白名单校验 (Allowed Extensions Whitelist)
+      // 仅允许亚马逊 Kindle 官方认可的书籍、文档和图片格式
+      const ALLOWED_EXTENSIONS = ["epub", "pdf", "txt", "doc", "docx", "html", "htm", "rtf", "jpg", "jpeg", "png", "gif", "bmp", "prc"];
+      const fileExtension = fileName.split('.').pop()?.toLowerCase();
+
+      if (!fileExtension || !ALLOWED_EXTENSIONS.includes(fileExtension)) {
+        await sendTelegramMessage(
+          env.TELEGRAM_BOT_TOKEN,
+          chatId,
+          `⚠️ 抱歉，亚马逊 Kindle 官方不支持推送 .${fileExtension || "未知"} 格式的书籍。\n\n📚 目前支持的格式有：\n• 推荐格式：.epub (排版最佳)\n• 其他文档：.pdf, .txt, .doc, .docx, .html, .rtf\n• 支持图片：.jpg, .jpeg, .png, .gif, .bmp\n\n💡 如果是 .mobi 或 .azw3，建议您先在电脑端 Calibre 中一键转换为 .epub 再发送！`
+        );
+        return new Response("OK", { status: 200 });
+      }
+
+      // 5. 大文件检测限制
       const MAX_SIZE_MB = 20;
       if (fileSize > MAX_SIZE_MB * 1024 * 1024) {
         await sendTelegramMessage(
@@ -68,7 +82,7 @@ export default {
         return new Response("OK", { status: 200 });
       }
 
-      // 5. 全局去重校验：查询指纹数据库中是否已存在
+      // 6. 全局去重校验：查询指纹数据库中是否已存在
       if (fileUniqueId) {
         const isAlreadySent = await env.KINDLE_BOT_KV.get(fileUniqueId);
         if (isAlreadySent) {
@@ -81,11 +95,11 @@ export default {
         }
       }
 
-      // 6. 状态反馈：通知用户正在处理中
+      // 7. 状态反馈：通知用户正在处理中
       await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `⏳ 正在从 Telegram 接收书籍《${fileName}》并准备推送到 Kindle，请稍候...`);
 
-      // 7. 下载图书文件
-      // 7.1 获取文件下载路径
+      // 8. 下载图书文件
+      // 8.1 获取文件下载路径
       const fileInfoResponse = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`);
       if (!fileInfoResponse.ok) {
         throw new Error(`获取 TG 文件路径失败: ${fileInfoResponse.statusText}`);
@@ -96,7 +110,7 @@ export default {
       }
       const filePath = fileInfoData.result.file_path;
 
-      // 7.2 真实下载二进制文件数据
+      // 8.2 真实下载二进制文件数据
       const fileDownloadUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`;
       const fileResponse = await fetch(fileDownloadUrl);
       if (!fileResponse.ok) {
@@ -105,10 +119,10 @@ export default {
 
       const fileArrayBuffer = await fileResponse.arrayBuffer();
 
-      // 8. 二进制流转为 Base64 编码 (Resend API 要求格式)
+      // 9. 二进制流转为 Base64 编码 (Resend API 要求格式)
       const base64Content = arrayBufferToBase64(fileArrayBuffer);
 
-      // 9. 构造并发送邮件 (调用 Resend API)
+      // 10. 构造并发送邮件 (调用 Resend API)
       const emailResponse = await fetch("https://api.resend.com/emails", {
         method: "POST",
         headers: {
@@ -137,12 +151,12 @@ export default {
       const emailResult: any = await emailResponse.json();
       console.log(`Email sent successfully, ID: ${emailResult.id}`);
 
-      // 10. 去重归档：将发送成功的文件指纹写入 KV 数据库（记录发送时间）
+      // 11. 去重归档：将发送成功的文件指纹写入 KV 数据库（记录发送时间）
       if (fileUniqueId) {
         await env.KINDLE_BOT_KV.put(fileUniqueId, new Date().toISOString());
       }
 
-      // 11. 推送成功反馈
+      // 12. 推送成功反馈
       await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `✅ 《${fileName}》发送成功！正在通过亚马逊云端同步到您的 Kindle，请在数分钟内注意设备更新。`);
 
       return new Response("OK", { status: 200 });
